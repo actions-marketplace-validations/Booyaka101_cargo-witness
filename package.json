@@ -56,7 +56,7 @@
   },
   "devDependencies": {
     "@action-validator/cli": "^0.6.0",
-    "@vercel/ncc": "^0.44.1"
+    "@vercel/ncc": "^0.45.0"
   },
   "allowScripts": {},
   "overrides": {
