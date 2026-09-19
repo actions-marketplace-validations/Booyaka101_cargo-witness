@@ -20,7 +20,7 @@ jobs:
   guards:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       # Our own tool. Locks the runner image's tool versions and diffs them when
       # GitHub bumps the image — including when a floating label like
       # ubuntu-latest silently re-points. Fails once a pinned label is within
