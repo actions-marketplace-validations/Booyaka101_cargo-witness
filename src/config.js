@@ -25,7 +25,7 @@ const config = {
   giteaApiBase: trim(process.env.CARGO_WITNESS_GITEA_API) || null,
   giteaRawBase: trim(process.env.CARGO_WITNESS_GITEA_RAW) || null,
 
-  userAgent: 'cargo-witness/1.3 (github.com/Booyaka101/cargo-witness)',
+  userAgent: 'cargo-witness/1.5 (github.com/Booyaka101/cargo-witness)',
 };
 
 module.exports = { config };

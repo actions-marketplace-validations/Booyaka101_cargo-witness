@@ -120,6 +120,10 @@ async function fetchCrateMeta(name, version, { absent404 = true } = {}) {
     repository: v.repository || c.repository || null,
     checksum: v.checksum || null,
     yanked: !!v.yanked,
+    // Registry publish time (RFC 3923 calls it `pubtime`). Kept as the absolute
+    // ISO timestamp the API returned so age is always recomputed at evaluation
+    // time; a derived age cached in the store would go stale immediately.
+    createdAt: v.created_at || null,
     // Trusted Publishing (OIDC) record set by crates.io — cannot be forged by
     // the publisher. { provider, repository, run_id, sha } or null.
     trustpub: v.trustpub_data || null,

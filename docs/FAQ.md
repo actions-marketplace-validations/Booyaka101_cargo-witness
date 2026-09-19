@@ -180,6 +180,7 @@ All three:
 | `FILE_NOT_IN_GIT` | medium | A file shipped in the artifact isn't present in source. |
 | `BINARY_NOT_IN_GIT` | high | A precompiled binary (`.so`/`.dll`/`.exe`/`.dylib`/`.wasm`) in the artifact but not in source. |
 | `CHECKSUM_MISMATCH` | high | Downloaded artifact's sha256 doesn't match crates.io's recorded checksum. |
+| `PUBLISH_AGE` | medium | The lockfile pins a version younger than `--min-publish-age`. Opt-in: off unless you pass the flag. |
 | `VCS_MISMATCH` | info | Discrepancy in the embedded VCS metadata. |
 | `TRUSTED_PUBLISH` | info | Positive: the crate was published with Trusted Publishing (attested commit). |
 | `YANKED` | info | The version has been yanked from crates.io. |
@@ -189,7 +190,45 @@ to set the gate.
 
 ---
 
-### 15. How do I suppress a finding I've reviewed and accepted?
+### 15. Doesn't cargo already have a minimum publish age?
+
+Yes, from Rust 1.100. [RFC 3923](https://rust-lang.github.io/rfcs/3923-cargo-min-publish-age.html)
+was stabilized by [rust-lang/cargo#17335](https://github.com/rust-lang/cargo/pull/17335)
+on 2026-08-28. What it gates is **resolution**. Its own rule is that with
+`resolver.incompatible-publish-age = "deny"` the resolver "will ignore these
+versions unless they already exist in the `Cargo.lock` file", and "once the
+versions are recorded in `Cargo.lock`, subsequent resolves will keep them".
+
+So the versions cargo's gate never sees are exactly the ones already pinned:
+a version resolved before you set the policy, or one forced through with
+`CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p foo`, which
+#17335 says is "preserved within the lockfile". `cargo-witness --scan
+--min-publish-age "7 days"` reads that committed lockfile and tells you which
+pins are still inside the window. The two compose; they do not overlap.
+
+`cargo-witness --write-cargo-config --min-publish-age "7 days"` writes cargo's
+half into `.cargo/config.toml` for you, and reads your installed cargo to tell
+you whether it will actually be enforced yet.
+
+---
+
+### 16. Why is `PUBLISH_AGE` medium and not high?
+
+Because it is not a detection. A young version is not a compromised version;
+the overwhelming majority of them are fine. What the flag says is that nobody
+has had time to look yet, and that the three arrayref-wave compromises were
+each deleted inside 107 minutes of publication. Medium is enough to fail the
+default `--fail-on medium` gate, which is the behaviour a cooldown policy
+wants, without claiming something the check cannot know.
+
+It is raised to `error` in SARIF in one case: when the same crate also trips a
+high flag from another lane. Young *and* diverging from its source is the
+combination worth waking someone for, and it is reported as one finding rather
+than two.
+
+---
+
+### 17. How do I suppress a finding I've reviewed and accepted?
 
 Add an entry to `.cargo-witness.json` (or point at one with `--config`):
 
@@ -207,7 +246,7 @@ still counted and reported, but they don't mark the package suspicious.
 
 ---
 
-### 16. What's the roadmap regarding provenance/attestation?
+### 18. What's the roadmap regarding provenance/attestation?
 
 The long-term direction is to **compose with crates.io provenance and attestation**
 as that ecosystem matures. Trusted Publishing support — using the OIDC-attested
@@ -219,7 +258,7 @@ becomes the norm.
 
 ---
 
-### 17. Should I treat a clean result as proof my dependencies are safe?
+### 19. Should I treat a clean result as proof my dependencies are safe?
 
 No. A clean cargo-witness result means the published artifact matched the source it
 claims to come from — that's a genuinely useful signal, but it's one signal among
@@ -230,7 +269,7 @@ verification — not instead of them.
 
 ---
 
-### 18. I found a real divergence in a popular crate. What now?
+### 20. I found a real divergence in a popular crate. What now?
 
 Disclose responsibly, privately, first. Report to the crate owner through a private
 channel and to the RustSec advisory database

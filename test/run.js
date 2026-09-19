@@ -7,11 +7,13 @@ const path = require('path');
 const files = [
   'differ.test.js',
   'manifest.test.js',
+  'publish-age.test.js',
   'cargo-lock.test.js',
   'ci-diff.test.js',
   'units.test.js',
   'hosts.test.js',
   'integration.test.js',
+  'action-runtime.test.js',
 ];
 
 let failed = 0;

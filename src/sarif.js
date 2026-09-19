@@ -14,13 +14,16 @@ function toSarif(suspicious, lockPath = 'Cargo.lock') {
   const results = [];
 
   for (const pkg of suspicious || []) {
+    // A young pin is a warning on its own. A young pin on a crate that ALSO
+    // trips a high flag is the emergency, so that result is raised to error.
+    const withHigh = (pkg.flags || []).some((f) => severityOf(f) === 'high');
     for (const f of pkg.flags || []) {
       const flag = typeof f === 'string' ? f : f.flag;
       const file = typeof f === 'string' ? null : f.file;
       ruleIds.add(flag);
       results.push({
         ruleId: flag,
-        level: sarifLevel(severityOf(f)),
+        level: flag === 'PUBLISH_AGE' && withHigh ? 'error' : sarifLevel(severityOf(f)),
         message: {
           text:
             `${pkg.name}@${pkg.version}: ${flag}` +
@@ -74,6 +77,7 @@ const RULE_TEXT = {
   BUILD_RS_INJECTED: 'build.rs present in the published crate but absent from git.',
   DEP_INJECTED: 'A dependency declared in the published crate\'s manifest is absent from the git manifest.',
   BUILD_RS_MODIFIED: 'build.rs content differs between the published crate and git.',
+  PUBLISH_AGE: "The lockfile pins a version younger than the configured minimum publish age; cargo's own resolver gate exempts versions already recorded in Cargo.lock.",
   SOURCE_MODIFIED: 'A Rust source file differs between the published crate and git.',
   FILE_NOT_IN_GIT: 'A Rust source file present in the artifact is absent from git.',
   BINARY_NOT_IN_GIT: 'A precompiled binary is shipped in the artifact but not in git.',

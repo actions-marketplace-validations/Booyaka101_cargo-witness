@@ -89,4 +89,20 @@ async function pool(items, limit, worker) {
   return results;
 }
 
-module.exports = { fetchRetry, pool, sleep };
+/**
+ * Greedy word wrap to `width` columns. Used wherever a finding's detail has to
+ * stay readable in an 80-column terminal.
+ * @returns {string[]}
+ */
+function wrapText(text, width) {
+  const out = [];
+  let line = '';
+  for (const word of String(text).split(/\s+/).filter(Boolean)) {
+    if (line && `${line} ${word}`.length > width) { out.push(line); line = word; }
+    else line = line ? `${line} ${word}` : word;
+  }
+  if (line) out.push(line);
+  return out;
+}
+
+module.exports = { fetchRetry, pool, sleep, wrapText };

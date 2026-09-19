@@ -6,3 +6,6 @@ node_modules/
 # dist/action.js (built with `npm run build:action`).
 .tmp-demo/
 tmp-measure/
+
+# Local build notes, not for the public repo
+PROGRESS.md

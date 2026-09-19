@@ -25,6 +25,7 @@ appearing in the public repository.
 | **`CRATE_REMOVED`** | crates.io no longer serves the crate at all (version and crate both 404). |
 | `VCS_MISMATCH` (info) | The self-reported publish commit disagrees with the OIDC-attested commit. |
 | `TRUSTED_PUBLISH` (info) | Positive signal: published via crates.io Trusted Publishing and verified against the attested commit. |
+| **`PUBLISH_AGE`** (opt-in) | The lockfile pins a version younger than `--min-publish-age`. Off unless you pass the flag. Needs no git side, so it fires where the divergence lanes cannot. |
 | `YANKED` (info) | The version is yanked on crates.io. |
 
 A `high` or `medium` flag → the package is recorded `SUSPICIOUS` and (interactively)
@@ -64,6 +65,159 @@ workspace siblings and a shared workspace root reuse one fetch). Set
 mid-scan, the comparison stops for the rest of the run rather than guessing.
 
 ![DEP_INJECTED on the arrayref-shaped injection, reconstructed in an offline fixture (the real 0.3.10 artifact is deleted)](docs/screenshot-diff-dep.png)
+
+## The publish-age gate (declining to go first)
+
+`arrayref@0.3.10` was online for 86 minutes. `internment@0.8.7` for 90.
+`append-only-vec@0.1.9` for 107. Every detection above needs both the published
+artifact and the git source, which is right for artifact-versus-source
+divergence and blind to an attack shape nobody has catalogued yet. A publish-age
+gate needs neither. It asks only how old the pinned version is, so any threshold
+at all would have sat all three of those compromises out.
+
+It detects nothing. It declines to go first.
+
+```console
+$ cargo-witness --scan --min-publish-age "24 hours"
+4 registry package(s) in lockfile, 4 not yet checked.
+  [clean] arrayref@0.3.9 @f8d0299
+  [clean] serde@1.0.197 (git root: serde) @5fa711d
+  [SUSPICIOUS !!] geiserx_ts_netstack_smoltcp_socket@0.47.10 (git root: ts_netstack_smoltcp_socket) @4873ee5✓ {TRUSTED_PUBLISH}
+  [SUSPICIOUS !!] geiserx_ts_disco_protocol@0.47.10 (git root: ts_disco_protocol) @4873ee5✓ {TRUSTED_PUBLISH}
+
+PUBLISH_AGE (2)
+  threshold 24 hours (registry.global-min-publish-age)
+  geiserx_ts_netstack_smoltcp_socket@0.47.10
+    2m old   clears 2026-09-09 01:43Z
+    published 2026-09-08 01:43Z
+  geiserx_ts_disco_protocol@0.47.10            2m old   clears 2026-09-09 01:43Z
+    published 2026-09-08 01:43Z
+
+  This says nothing about what these crates do. arrayref@0.3.10,
+  internment@0.8.7 and append-only-vec@0.1.9 were each deleted within 107
+  minutes of publication. Wait, pin an older version, or exempt with
+  --min-publish-age-exclude <name>.
+
+Done. 4 package(s) checked, 2 SUSPICIOUS.
+Run 'cargo-witness --report' for details.
+$ echo $?
+1
+```
+
+(A real run, 2026-09-08. Both gated crates are published through Trusted
+Publishing and verified clean against their attested commit. Nothing is wrong
+with them; they are two minutes old, and nobody has had time to look.)
+
+The gate needs no git side at all, which is what makes it different from every
+other lane here. Scanning `tatara-kube@0.2.595` the same day: `NO_GIT_TAG` with
+the flag absent, because its source could not be resolved and no divergence lane
+could say anything about it, and `PUBLISH_AGE` with the flag set.
+
+![the publish-age gate on a live lockfile: --scan, --report and --diff against real crates.io metadata](docs/screenshot-publish-age.png)
+
+`--min-publish-age` is **off unless you pass it**, and it is the only thing in
+this release that can change an exit code. A gated crate is `medium`, so it
+fails the default `--fail-on medium`.
+
+### Cargo has this. It gates the other half.
+
+[RFC 3923](https://rust-lang.github.io/rfcs/3923-cargo-min-publish-age.html) is
+stabilized: [rust-lang/cargo#17335](https://github.com/rust-lang/cargo/pull/17335)
+merged 2026-08-28 for Rust 1.100, after `-Zmin-publish-age` on nightly from
+2026-06-21. What cargo gates is **resolution**. With
+`resolver.incompatible-publish-age = "deny"` the resolver "will ignore these
+versions unless they already exist in the `Cargo.lock` file", and "once the
+versions are recorded in `Cargo.lock`, subsequent resolves will keep them".
+
+So a young version that is already pinned is invisible to the resolver from then
+on. So is one forced through with `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow
+cargo update -p foo`, which #17335 says is "preserved within the lockfile". That
+committed lockfile is what this gate reads. The two halves compose: cargo stops
+young versions getting *into* the lockfile, cargo-witness tells you about the
+ones already in it.
+
+Nearest neighbour is [cargo-cooldown](https://github.com/dertin/cargo-cooldown),
+a cargo wrapper that resolves the graph and then rewrites fresh versions back to
+older compatible ones. Different job, other side of the line: its own README
+points CI and release automation at "plain Cargo against committed `Cargo.lock`
+files".
+
+### The duration grammar is cargo's
+
+`N seconds|minutes|hours|days|weeks|months`, singular or plural, at most one
+space, or `"0"` to disable. Parsed exactly as cargo's `src/util/time_span.rs`
+parses it, down to a month being 2,629,746 seconds and `" 1 day"`, `"1 day "`
+and `"1  second"` all being rejected. One policy string works in both places.
+
+### Writing the policy where cargo will read it
+
+```console
+$ cargo-witness --write-cargo-config --min-publish-age "7 days"
+cargo-witness --write-cargo-config -> .cargo\config.toml
+  this file does not exist yet; it will be created.
+  created: registry.global-min-publish-age = "7 days"
+  exemptions: (none)
+
+  Your cargo is 1.95.0. cargo enforces these keys from Rust 1.100
+  (stabilized in rust-lang/cargo#17335; nightly -Zmin-publish-age before
+  that), so on this toolchain the file is inert until you upgrade.
+  Either way cargo only gates RESOLUTION, and its own rule exempts versions
+  already recorded in Cargo.lock. Run
+    cargo-witness --scan --min-publish-age "7 days"
+  to audit the pinned half.
+```
+
+The edit is line-based, so every other key, comment, blank line and the file's
+EOL style survive it. If the key already has a different value the old one is
+printed before it changes; nothing is overwritten in silence. The installed
+cargo is read, not assumed, so the note about 1.100 tells you which case you are
+actually in. Target another file with `--cargo-config <path>`.
+
+Both spellings cargo accepts are handled: the `[registry]` table, and a
+top-level dotted `registry.global-min-publish-age = "..."`. Whichever your file
+already uses is the one it keeps. That matters, because TOML forbids mixing
+them: appending a `[registry]` table to a file that carries any top-level
+`registry.` dotted key makes cargo refuse to load the config at all.
+
+Exemptions are recorded as a `# cargo-witness-exclude = [...]` marker comment
+next to the key. RFC 3923 defers a per-package exclude list to future work and
+cargo ships no key for one, so writing an invented key would leave you with a
+config file cargo complains about. cargo-witness reads its own marker back.
+
+If the file already sets `resolver.incompatible-publish-age = "allow"`, which
+turns cargo's resolver gate off entirely, that is printed as a note. It is not
+rewritten: which of the two cargo keys you want is your call.
+
+### Edge cases
+
+| Case | Behaviour |
+|------|-----------|
+| No `created_at` on the version | `unchecked`, reported, **never blocked**. Mirrors, vendored sources and alternate registries legitimately publish no time, and RFC 3923's own applicability section exempts registries that don't set `pubtime`. Failing those closed would break the gate exactly where it is wanted. |
+| Age exactly at the threshold | Cleared, not gated. |
+| Git and path dependencies | Never reach the gate. They have no registry publish time, and the RFC exempts them for the same reason. |
+| The whole crate 404s | Stays `VERSION_REMOVED` / `CRATE_REMOVED`. Not double-reported. |
+| Unparseable duration | Exit 2, naming the accepted units. |
+| Gated **and** carrying a high/medium flag | One entry saying both, not two findings. That combination is the emergency, and its SARIF result is raised to `error`. |
+
+### Exempting a crate
+
+```bash
+# One crate, or one exact version:
+cargo-witness --scan --min-publish-age "7 days" \
+  --min-publish-age-exclude internal-crate \
+  --min-publish-age-exclude hotfix@2.1.0
+```
+
+Or through the existing allowlist, which already matches on name and
+name+version:
+
+```json
+{ "allow": [{ "name": "internal-crate", "flag": "PUBLISH_AGE" }] }
+```
+
+The gate deliberately does **not** read `.cargo/config.toml` during a scan.
+Reading it would change what an existing user's `--scan` does the moment they
+adopt cargo's key, and this release changes nothing unless you ask.
 
 ## Why this catches what a `git clone` review misses
 
@@ -126,6 +280,12 @@ node bin/cargo-witness.js --report
 # CI mode: scan only packages newly ADDED in the last commit, print JSON,
 # exit 1 if any are SUSPICIOUS:
 node bin/cargo-witness.js --ci --lock Cargo.lock
+
+# Add a cooldown: flag any pin younger than 7 days (exit 1 if any is):
+node bin/cargo-witness.js --scan --min-publish-age "7 days"
+
+# Put cargo's half of that policy in .cargo/config.toml:
+node bin/cargo-witness.js --write-cargo-config --min-publish-age "7 days"
 ```
 
 Once published to npm you can run it with `npx cargo-witness --scan`.
@@ -141,6 +301,9 @@ Once published to npm you can run it with `npx cargo-witness --scan`.
 | `--fail-on <level>` | Exit non-zero at/above severity `high\|medium\|info` (default `medium`). |
 | `--sarif <path>` | Write a SARIF 2.1.0 report for GitHub code scanning. |
 | `--no-recheck` | Skip the 24h registry metadata re-check of already-cleared packages. |
+| `--min-publish-age <span>` | Flag lockfile pins younger than `<span>` (RFC 3923 grammar). Off unless passed. |
+| `--min-publish-age-exclude <name>` | Exempt a crate from the gate; repeatable, `name` or `name@version`. |
+| `--cargo-config <path>` | Target for `--write-cargo-config` (default `.cargo/config.toml`). |
 | `--json` | Machine-readable output (`--scan` / `--report`). |
 | `--now` | (`--daemon`) run one scan immediately on startup. |
 | `--quiet`, `-q` | Suppress per-crate progress lines. |
@@ -149,7 +312,8 @@ Once published to npm you can run it with `npx cargo-witness --scan`.
 Extra modes: `--history` prints recent scan runs; `--report --json` emits the
 suspicious list as JSON; `--diff <name> <version>` shows exactly how a crate's
 published artifact differs from its source (unified diff of modified `build.rs` /
-source), for triaging a finding.
+source), for triaging a finding; `--write-cargo-config --min-publish-age <span>`
+writes the threshold into `.cargo/config.toml` for cargo's own resolver gate.
 
 `--scan` and `--ci` exit non-zero when a finding meets `--fail-on`, so they
 double as gates in any pipeline. `--daemon` shuts down cleanly on Ctrl-C / SIGTERM.
@@ -244,7 +408,8 @@ newly-added dependency is suspicious:
 #   ${{ steps.witness.outputs.suspicious }}   # JSON array
 ```
 
-Inputs: `cargo-lock`, `github-token`, `fail-on`, `sarif`, `config`. It writes a
+Inputs: `cargo-lock`, `github-token`, `fail-on`, `sarif`, `config`,
+`min-publish-age`, `min-publish-age-exclude`. It writes a
 **job summary** (a table of any suspicious packages) and sets the
 `suspicious-count` / `suspicious` step outputs.
 
@@ -256,6 +421,23 @@ persistent SQLite store for cross-run history.
 
 A ready-to-copy example is in
 [`docs/example-workflow.yml`](docs/example-workflow.yml).
+
+### Runner requirements
+
+The action runs on `node24`, so it needs a runner image that ships Node 24.
+Every image GitHub currently supports does, but two cases do not:
+
+- **macOS 13.4 and older, including a `macos-13` runner that has not been
+  patched past 13.4.** Node 24 requires macOS >= 13.5, so the runtime will not
+  start. `macos-14` and later are fine.
+- **ARM32 runners (`linux/arm`, armv7l, 32-bit Raspberry Pi and similar).**
+  Node.js publishes no `linux-armv7l` build for 24 at all (20 had one), and
+  armv7 was downgraded to Experimental in Node 24, so there is nothing for the
+  runner to launch. ARM64 is unaffected.
+
+If you are on one of those, `cargo-witness@v1.5.0` still declares `node20`, but
+only until 2026-09-23. After that date GitHub removes the Node 20 runtime from
+the runners and v1.5.0 stops launching anywhere.
 
 ## Docker
 
@@ -288,10 +470,12 @@ already primed by that attack.
    content confirmation.
 5. **`src/differ.js`** — workspace-aware diff (blob-SHA content compare) →
    `CLEAN` / `SUSPICIOUS` / `NO_GIT_TAG` plus flags.
-6. **`src/severity.js`** / **`src/allowlist.js`** — severity model + suppression.
-7. **`src/scanner.js`** / **`src/notifier.js`** — orchestrate, record, desktop-notify.
-8. **`src/report.js`** / **`src/sarif.js`** — severity table / JSON / SARIF output.
-9. **`bin/cargo-witness.js`** — CLI; **`src/action.js`** — GitHub Action entry.
+6. **`src/publish-age.js`** / **`src/cargo-config.js`** — RFC 3923 duration parsing,
+   the age gate, and the `.cargo/config.toml` reader/writer.
+7. **`src/severity.js`** / **`src/allowlist.js`** — severity model + suppression.
+8. **`src/scanner.js`** / **`src/notifier.js`** — orchestrate, record, desktop-notify.
+9. **`src/report.js`** / **`src/sarif.js`** — severity table / JSON / SARIF output.
+10. **`bin/cargo-witness.js`** — CLI; **`src/action.js`** — GitHub Action entry.
 
 ## Implementation notes (verified against live services)
 
@@ -301,9 +485,19 @@ already primed by that attack.
 - The API's `dl_path` (`/api/v1/crates/{n}/{v}/download`) is a crates.io redirect
   path, **not** a static.crates.io path — prefixing it onto `static.crates.io`
   returns **403**. cargo-witness downloads from the direct CDN pattern instead.
-- `action.yml` uses `using: node20` (current LTS runner, and the value that
-  passes `action-validator`). GitHub also supports `node24`; swap it in once your
-  `action-validator` schema includes it.
+- `action.yml` uses `using: node24`. GitHub removes Node 20 from the runners on
+  **2026-09-23**, and an action declaring `node20` will not launch after that.
+  The runner cannot find the interpreter, so the step fails before any of this
+  code runs. `test/action-runtime.test.js` fails if `runs.using` names a runtime
+  that is gone or within 180 days of going, so the next move is a red test
+  rather than a broken workflow.
+- `npm run validate:action` still runs `@action-validator/cli`, but no longer
+  lets it veto the runtime. Its schema was last published on 2024-02-23 and is
+  compiled into a wasm blob, so its `runs.using` enum stops at `node20` and
+  cannot be pointed at a newer copy. The wrapper re-validates the file with the
+  runtime swapped for one the schema accepts: if that clears every error, the
+  runtime string was the only objection and the rest of the file is valid.
+  Anything else the validator reports still fails.
 - Content comparison uses the **git blob SHA** returned by the trees API
   (`sha1("blob "+len+"\0"+content)`), so every shared file is content-checked with
   **no extra network calls**; only a SHA mismatch triggers a raw fetch, which is
@@ -315,11 +509,21 @@ already primed by that attack.
 ## Tests
 
 ```bash
-npm test        # 7 suites, 96 assertions
+npm test        # 9 suites, 165 assertions
 ```
 
+- `action-runtime.test.js` — `action.yml` declares a runtime GitHub still runs,
+  and the scoped `validate:action` gate still fails on any other schema error.
 - `differ.test.js` — blob-SHA diff, workspace false-positive fix, real-attack
   detection, truncated-tree handling, content-suspect detection.
+- `publish-age.test.js` — the RFC 3923 duration grammar against cargo's own
+  accept/reject vectors, threshold evaluation (boundary, missing `created_at`,
+  recomputation from the absolute timestamp), the `.cargo/config.toml` round
+  trip (comments, blank lines, CRLF, idempotency), and an offline end-to-end run
+  covering a fresh pin, a boundary pin, a pin with no publish time, git and path
+  deps, **a crate whose git side cannot be resolved** (the regression that proves
+  the gate is independent of the diff lanes), the combined high-flag case,
+  exemptions, `--json`, SARIF levels and every CLI exit code.
 - `manifest.test.js` — dependency-name extraction (all tables, renames,
   workspace inheritance), the injected-dependency case, and every conservative
   suppression (truncated tree, unparseable manifest, unresolvable inheritance).

@@ -4,7 +4,8 @@
  * Severity for each finding flag. Drives report colouring, --fail-on gating and
  * SARIF `level`.
  *   high   → strong tamper signal (build.rs / binary / checksum / registry removal)
- *   medium → source divergence from git (content or unexpected file)
+ *   medium → source divergence from git (content or unexpected file), or a
+ *            lockfile pin younger than the configured publish-age threshold
  *   info   → advisory (yanked)
  */
 const SEVERITY = {
@@ -17,6 +18,7 @@ const SEVERITY = {
   CRATE_REMOVED: 'high',     // crates.io no longer serves the crate at all
   SOURCE_MODIFIED: 'medium',
   FILE_NOT_IN_GIT: 'medium',
+  PUBLISH_AGE: 'medium',     // pinned version younger than the configured threshold
   VCS_MISMATCH: 'info',      // self-reported commit ≠ attested commit
   TRUSTED_PUBLISH: 'info',   // positive: published via OIDC Trusted Publishing
   YANKED: 'info',

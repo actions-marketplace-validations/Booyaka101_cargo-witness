@@ -32,6 +32,12 @@ jobs:
           cargo-lock: Cargo.lock
           github-token: ${{ github.token }}
           fail-on: medium # high | medium | info
+          # Optional cooldown: also fail on a newly-added pin younger than this.
+          # RFC 3923 grammar (N seconds|minutes|hours|days|weeks|months, or "0").
+          # Omit it and nothing about the check changes.
+          min-publish-age: 7 days
+          # Crates exempt from the cooldown, comma or space separated.
+          # min-publish-age-exclude: internal-crate, hotfix@2.1.0
 
       - name: Report result
         if: always()

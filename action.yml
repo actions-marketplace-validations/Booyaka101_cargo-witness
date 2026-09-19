@@ -25,11 +25,21 @@ inputs:
     description: Optional path to an allowlist file (.cargo-witness.json)
     required: false
     default: ''
+  min-publish-age:
+    description: >-
+      Flag lockfile pins younger than this (RFC 3923 grammar, e.g. "7 days").
+      Off unless set.
+    required: false
+    default: ''
+  min-publish-age-exclude:
+    description: Crates exempt from min-publish-age; comma or space separated, name or name@version
+    required: false
+    default: ''
 outputs:
   suspicious-count:
     description: Number of newly-added packages flagged SUSPICIOUS
   suspicious:
     description: JSON array of suspicious packages (name, version, flags)
 runs:
-  using: node20
+  using: node24
   main: dist/action.js

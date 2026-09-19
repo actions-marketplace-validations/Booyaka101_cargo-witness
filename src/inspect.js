@@ -6,6 +6,7 @@ const { fetchGitTree } = require('./git-tree');
 const { diff, normalizeSource } = require('./differ');
 const { diffManifests } = require('./manifest');
 const { severityOf, isSuspicious } = require('./severity');
+const { evaluatePublishAge, isExcluded, formatAge, formatStamp, KEY } = require('./publish-age');
 
 const C = {
   red: '\x1b[31m', green: '\x1b[32m', yellow: '\x1b[33m', cyan: '\x1b[36m',
@@ -16,8 +17,11 @@ const C = {
  * `--diff <name> <version>` — human investigation view for one crate: resolve
  * the source commit, list which files diverge, and print a unified diff of any
  * modified Rust source (especially build.rs) so a human can judge the finding.
+ *
+ * With `publishAge` set (--min-publish-age) it also says, in one line, why the
+ * version was or was not gated. Without it the output is unchanged.
  */
-async function inspectDiff(name, version, { log = console.log } = {}) {
+async function inspectDiff(name, version, { log = console.log, publishAge = null } = {}) {
   // A withdrawn version has no artifact to diff; explain the finding instead of
   // failing on the missing download.
   const meta = await fetchCrateMeta(name, version);
@@ -36,6 +40,9 @@ async function inspectDiff(name, version, { log = console.log } = {}) {
     return { status: 'SUSPICIOUS', flags: [{ flag, file: null, severity: 'high' }] };
   }
 
+  log(`${C.bold}cargo-witness --diff ${name}@${version}${C.reset}`);
+  if (publishAge) printPublishAgeLine(name, version, meta, publishAge, log);
+
   const crate = await fetchCrate(name, version, { meta });
   try {
     const tp = crate.trustpub;
@@ -45,7 +52,6 @@ async function inspectDiff(name, version, { log = console.log } = {}) {
 
     const tree = await fetchGitTree(crate.repository, name, version, { vcsSha, attestedSha, attestedRepo });
 
-    log(`${C.bold}cargo-witness --diff ${name}@${version}${C.reset}`);
     if (!tree.gitFiles) {
       log(`${C.yellow}No comparable source found (repository=${crate.repository || 'none'}). Nothing to diff.${C.reset}`);
       return { status: 'NO_GIT_TAG' };
@@ -115,6 +121,31 @@ async function inspectDiff(name, version, { log = console.log } = {}) {
   } finally {
     crate.cleanup();
   }
+}
+
+/**
+ * One line saying whether the publish-age gate fired on this version, and why.
+ * The gate reads registry metadata only, so this is decided before any artifact
+ * or git-side work and is printed whatever those lanes go on to do.
+ */
+function printPublishAgeLine(name, version, meta, publishAge, log) {
+  const say = (verdict, why) => {
+    log(`${C.dim}publish age:${C.reset} ${verdict} — ${why}`);
+    log(`${C.dim}             threshold ${publishAge.raw} (${KEY})${C.reset}`);
+  };
+
+  if (isExcluded(publishAge.excludes, name, version)) {
+    return say(`${C.green}not gated${C.reset}`, 'exempt via --min-publish-age-exclude');
+  }
+  const ev = evaluatePublishAge(meta.createdAt, publishAge.ms);
+  if (ev.state === 'unchecked') {
+    return say(`${C.yellow}unchecked${C.reset}`, `${ev.reason}; an unknown age is never gated`);
+  }
+  const age = `${formatAge(ev.ageMs)} old (published ${formatStamp(ev.publishedMs)})`;
+  if (ev.state === 'cleared') {
+    return say(`${C.green}not gated${C.reset}`, `${age}, past the threshold`);
+  }
+  return say(`${C.red}GATED${C.reset}`, `${age}, clears ${formatStamp(ev.clearsAtMs)}`);
 }
 
 /** Both dependency-name sets side by side, injected names marked in red. */

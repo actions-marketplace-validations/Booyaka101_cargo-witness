@@ -12,6 +12,7 @@
 const fs = require('fs');
 const { runCi } = require('./ci');
 const { createMemoryStore } = require('./store');
+const { parseDuration, DurationError, isAgeOnly } = require('./publish-age');
 
 function getInput(name, fallback) {
   const key = `INPUT_${name.toUpperCase().replace(/-/g, '_')}`;
@@ -48,7 +49,10 @@ function writeSummary(report) {
         if (typeof f === 'object' && f.detail) lines.push(`\n**\`${s.name}@${s.version}\`** ${f.detail}\n`);
       }
     }
-    lines.push('\nThese crates are a supply-chain risk: a published artifact diverging from its git source, or a version crates.io no longer serves. **Do not build until reviewed.**\n');
+    // An age-only run has found no divergence and must not claim it has.
+    lines.push(isAgeOnly(report.suspicious)
+      ? '\nNothing here says these crates are malicious. They are newer than the configured minimum publish age, so nobody has had time to look yet. **Wait, pin an older version, or exempt them.**\n'
+      : '\nThese crates are a supply-chain risk: a published artifact diverging from its git source, or a version crates.io no longer serves. **Do not build until reviewed.**\n');
   } else if (report.addedPackages.length === 0) {
     lines.push('\nNo dependency changes to check. ✅\n');
   } else {
@@ -65,6 +69,23 @@ async function main() {
   const failOn = getInput('fail-on', 'medium');
   const configPath = getInput('config', '') || undefined;
 
+  // Off unless the workflow asks for it, so an upgrade never changes a verdict.
+  const minAge = getInput('min-publish-age', '');
+  let publishAge = null;
+  if (minAge) {
+    let d;
+    try {
+      d = parseDuration(minAge);
+    } catch (e) {
+      if (!(e instanceof DurationError)) throw e;
+      console.log(`::error title=cargo-witness::${e.message}`);
+      process.exit(2);
+    }
+    const excludes = getInput('min-publish-age-exclude', '')
+      .split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
+    publishAge = { raw: d.raw, ms: d.ms, excludes };
+  }
+
   // Ephemeral runner → in-memory store; keeps the bundled action native-free
   // (no platform-specific better-sqlite3 binary committed to dist/).
   const { exitCode, report } = await runCi(lockPath, {
@@ -72,6 +93,7 @@ async function main() {
     sarif: sarif || undefined,
     failOn,
     configPath,
+    publishAge,
   });
 
   if (sarif) console.log(`cargo-witness: SARIF written to ${sarif}`);

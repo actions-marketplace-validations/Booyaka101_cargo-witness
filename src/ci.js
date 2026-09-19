@@ -18,6 +18,7 @@ const { maxSeverity, atLeast } = require('./severity');
  */
 async function runCi(lockPath = 'Cargo.lock', {
   concurrency = 5, store, sarif, configPath, failOn = 'medium', recheck = true,
+  publishAge = null,
 } = {}) {
   // The lockfile diff yields only name+version, so carry each package's
   // `source` over from the lockfile itself: without it an added alternate-
@@ -42,7 +43,7 @@ async function runCi(lockPath = 'Cargo.lock', {
   // Pass ALL added packages: runScan skips already-recorded ones in its scan
   // pass but may refresh their registry state in the re-check pass (persistent
   // store only; the Action's fresh in-memory store has nothing due).
-  const { results, rechecked, suppressedCount } = await runScan({
+  const { results, rechecked, suppressedCount, publishAge: publishAgeSummary } = await runScan({
     lockPath,
     packages: added,
     db,
@@ -50,6 +51,7 @@ async function runCi(lockPath = 'Cargo.lock', {
     allowRules: allow.rules,
     log: (m) => process.stderr.write(m + '\n'),
     recheck,
+    publishAge,
   });
 
   // A re-check may have updated a known package's verdict (e.g. its version
@@ -84,6 +86,7 @@ async function runCi(lockPath = 'Cargo.lock', {
     suppressedCount: suppressedCount || 0,
     worstSeverity: worst,
     failOn,
+    ...(publishAgeSummary ? { publishAge: publishAgeSummary } : {}),
   };
 
   if (sarif) {

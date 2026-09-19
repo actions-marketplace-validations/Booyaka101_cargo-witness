@@ -8,13 +8,14 @@ const { diff, normalizeSource, pushFlag } = require('./differ');
 const { diffManifests } = require('./manifest');
 const { isSuspicious, severityOf } = require('./severity');
 const { applyAllowlist } = require('./allowlist');
-const { pool } = require('./util');
+const { evaluatePublishAge, isExcluded, formatAge, formatStamp, KEY } = require('./publish-age');
+const { pool, wrapText } = require('./util');
 
 const RECHECK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 // Flags the metadata re-check owns: recomputed from current registry state on
 // every re-check; everything else (the git-diff verdict) is carried over.
-const META_FLAGS = new Set(['YANKED', 'VERSION_REMOVED', 'CRATE_REMOVED']);
+const META_FLAGS = new Set(['YANKED', 'VERSION_REMOVED', 'CRATE_REMOVED', 'PUBLISH_AGE']);
 
 /**
  * Core scan loop shared by --scan, --daemon and --ci.
@@ -24,6 +25,10 @@ const META_FLAGS = new Set(['YANKED', 'VERSION_REMOVED', 'CRATE_REMOVED']);
  * Detects: BUILD_RS_INJECTED, BUILD_RS_MODIFIED, DEP_INJECTED,
  * SOURCE_MODIFIED, FILE_NOT_IN_GIT, BINARY_NOT_IN_GIT, CHECKSUM_MISMATCH,
  * YANKED, VERSION_REMOVED, CRATE_REMOVED.
+ *
+ * With opts.publishAge set, a separate PUBLISH_AGE lane runs off registry
+ * metadata alone: it asks only how old the pinned version is, so it needs no
+ * git side and still fires when one cannot be resolved.
  *
  * A second, cheap pass re-checks crates.io metadata (no tarball, no git tree)
  * for already-recorded packages still in the lockfile whose last metadata check
@@ -40,8 +45,11 @@ const META_FLAGS = new Set(['YANKED', 'VERSION_REMOVED', 'CRATE_REMOVED']);
  * @param {Array} [opts.allowRules]  allowlist rules (from src/allowlist)
  * @param {boolean} [opts.recheck]  metadata re-check pass (default true)
  * @param {number} [opts.recheckMaxAgeMs]  staleness threshold (default 24h)
+ * @param {{raw:string, ms:number, excludes:string[]}} [opts.publishAge]  when
+ *        set (--min-publish-age), gate lockfile pins younger than `ms`. Absent
+ *        by default, and absent means byte-identical 1.4.0 behaviour.
  * @returns {Promise<{newCount:number, suspicious:Array, results:Array,
- *   rechecked:Array, suppressedCount:number}>}
+ *   rechecked:Array, suppressedCount:number, publishAge:object|null}>}
  */
 async function runScan(opts = {}) {
   const log = opts.log || (() => {});
@@ -80,9 +88,10 @@ async function runScan(opts = {}) {
   const treeCache = new Map();
   const blobCache = new Map();
   const state = { gitRateLimited: false, suppressed: 0 };
+  const publishAge = opts.publishAge || null;
 
   const results = await pool(todo, concurrency, (p) =>
-    checkOne(p, { db, log, treeCache, blobCache, state, allowRules }).catch((e) => {
+    checkOne(p, { db, log, treeCache, blobCache, state, allowRules, publishAge }).catch((e) => {
       log(`  [error] ${p.name}@${p.version}: ${e.message}`);
       return { ...p, status: 'ERROR', error: e.message, flags: [] };
     })
@@ -104,7 +113,7 @@ async function runScan(opts = {}) {
     if (due.length > 0) {
       log(`recheck: ${due.length} previously-checked package(s) due for a registry metadata re-check.`);
       rechecked = (await pool(due, concurrency, (row) =>
-        recheckOne(row, { db, log, state, allowRules }).catch((e) => {
+        recheckOne(row, { db, log, state, allowRules, publishAge }).catch((e) => {
           // Rate limit / outage: keep the previous verdict and leave the row
           // stale so the next run retries — never a removal finding.
           log(`  [recheck] ${row.name}@${row.version}: ${e.message} (kept previous verdict)`);
@@ -121,17 +130,52 @@ async function runScan(opts = {}) {
 
   db.recordRun({ new_count: newCount, suspicious_count: suspicious.length });
 
-  return { newCount, suspicious, results, rechecked, suppressedCount: state.suppressed };
+  return {
+    newCount, suspicious, results, rechecked, suppressedCount: state.suppressed,
+    publishAge: publishAge ? summarisePublishAge(publishAge, [...results, ...rechecked]) : null,
+  };
+}
+
+/**
+ * Roll the per-package evaluations up for the report section and --json.
+ * Only packages the scan actually visited carry one: an already-checked pin is
+ * skipped by pass 1, exactly as every other lane treats it.
+ */
+function summarisePublishAge(publishAge, results) {
+  const buckets = { gated: [], unchecked: [], excluded: [], cleared: [] };
+  const seen = new Set();
+  for (const r of results) {
+    const pa = r.publishAge;
+    if (!pa || !buckets[pa.state]) continue;
+    const key = `${r.name}@${r.version}`;
+    if (seen.has(key)) continue; // a re-checked row supersedes nothing; count it once
+    seen.add(key);
+    buckets[pa.state].push({
+      name: r.name, version: r.version, ...pa,
+      // The emergency case: young AND already flagged by another lane.
+      alsoFlagged: (r.flags || [])
+        .filter((f) => f.flag !== 'PUBLISH_AGE' && severityOf(f) !== 'info')
+        .map((f) => ({ flag: f.flag, file: f.file, severity: severityOf(f) })),
+    });
+  }
+  return {
+    threshold: publishAge.raw,
+    thresholdMs: publishAge.ms,
+    key: KEY,
+    excludes: [...publishAge.excludes],
+    gatedCount: buckets.gated.length,
+    uncheckedCount: buckets.unchecked.length,
+    excludedCount: buckets.excluded.length,
+    clearedCount: buckets.cleared.length,
+    gated: buckets.gated,
+    unchecked: buckets.unchecked,
+    excluded: buckets.excluded,
+  };
 }
 
 /** Print a finding's detail indented and wrapped, so it stays readable at 80 columns. */
 function logDetail(log, detail, width = 74) {
-  let line = '';
-  for (const word of String(detail).split(/\s+/)) {
-    if (line && `${line} ${word}`.length > width) { log(`      ${line}`); line = word; }
-    else line = line ? `${line} ${word}` : word;
-  }
-  if (line) log(`      ${line}`);
+  for (const line of wrapText(detail, width)) log(`      ${line}`);
 }
 
 /** Host of a Cargo.lock `source` string, for the skipped-package note. */
@@ -182,8 +226,18 @@ async function recheckOne(row, ctx) {
   const meta = await fetchCrateMeta(row.name, row.version, { absent404: row.cratesIo !== false });
   const base = (row.flags || []).filter((f) => !META_FLAGS.has(typeof f === 'string' ? f : f.flag));
   const raw = [];
+  let age = null;
   if (meta.absent) pushAbsenceFlag(raw, row.version, meta);
-  else if (meta.yanked) pushFlag(raw, 'YANKED', null);
+  else {
+    if (meta.yanked) pushFlag(raw, 'YANKED', null);
+    // PUBLISH_AGE is in META_FLAGS, so the stored one was just dropped from
+    // `base`: recompute it here or a pin that has since aged out stays flagged
+    // forever. With the gate off this run, dropping it is the right answer.
+    if (ctx.publishAge) {
+      age = gatePublishAge(row, meta, ctx);
+      raw.push(...age.flags);
+    }
+  }
 
   const fresh = suppress(ctx, row.name, row.version, raw);
   const flags = [...base, ...fresh];
@@ -198,28 +252,89 @@ async function recheckOne(row, ctx) {
     log(`  [recheck] ${row.name}@${row.version}: ${row.status} -> ${status}`);
   }
 
-  return { name: row.name, version: row.version, status, flags, previousStatus: row.status };
+  return {
+    name: row.name, version: row.version, status, flags, previousStatus: row.status,
+    publishAge: age ? age.publishAge : undefined,
+  };
+}
+
+/**
+ * Record a verdict reached from registry metadata alone — no artifact download,
+ * no git tree. Both metadata-only outcomes share it: a version the registry no
+ * longer serves, and a publish-age finding whose comparison lanes then failed.
+ */
+function recordMetaOnly(p, ctx, rawFlags, { note, details = true } = {}) {
+  const { db, log } = ctx;
+  const flags = suppress(ctx, p.name, p.version, rawFlags);
+  const status = isSuspicious(flags) ? 'SUSPICIOUS' : 'CLEAN';
+  db.recordPackage({ name: p.name, version: p.version, status, flags });
+  const names = flags.map((f) => f.flag).join(',');
+  log(`  [${status === 'SUSPICIOUS' ? 'SUSPICIOUS !!' : 'clean'}] ${p.name}@${p.version}` +
+    `${names ? ` {${names}}` : ''}${note ? ` (${note})` : ''}`);
+  if (details) for (const f of flags) if (f.detail) logDetail(log, f.detail);
+  return { status, flags };
+}
+
+/**
+ * Publish-age gate for one version, decided from registry metadata alone.
+ *
+ * Nothing here reads the artifact or the git side, which is the point: RFC 3923
+ * asks only how old the version is, and each of the three arrayref-wave
+ * versions was deleted well inside two hours, so any threshold at all sits them
+ * out. Age is recomputed from the absolute `created_at` on every evaluation.
+ */
+function gatePublishAge(p, meta, ctx) {
+  const { raw: threshold, ms, excludes } = ctx.publishAge;
+  const base = { threshold, thresholdMs: ms, key: KEY, createdAt: meta.createdAt || null };
+
+  if (isExcluded(excludes, p.name, p.version)) {
+    return { flags: [], publishAge: { ...base, state: 'excluded', reason: 'exempted by --min-publish-age-exclude' } };
+  }
+
+  const ev = evaluatePublishAge(meta.createdAt, ms);
+  const publishAge = { ...base, ...ev };
+  if (ev.state !== 'gated') return { flags: [], publishAge };
+
+  publishAge.clearsAt = new Date(ev.clearsAtMs).toISOString();
+  const flags = [];
+  pushFlag(flags, 'PUBLISH_AGE', null,
+    `published ${formatStamp(ev.publishedMs)}, ${formatAge(ev.ageMs)} old; threshold ` +
+    `${threshold} (${KEY}); clears ${formatStamp(ev.clearsAtMs)}. This says nothing about ` +
+    'what the crate does. arrayref@0.3.10, internment@0.8.7 and append-only-vec@0.1.9 were ' +
+    'each deleted within 107 minutes of publication.');
+  return { flags, publishAge };
 }
 
 async function checkOne(p, ctx) {
-  const { db, log, treeCache, blobCache, state } = ctx;
-  const label = `${p.name}@${p.version}`;
-
   // Metadata first: a 404 here is the finding (crates.io deleted the version),
   // not an error — there is no artifact to download or diff. Only genuine
   // crates.io entries are probed; alternate registries keep the old throw.
   const meta = await fetchCrateMeta(p.name, p.version, { absent404: p.cratesIo !== false });
   if (meta.absent) {
+    // A packument that 404s is VERSION_REMOVED / CRATE_REMOVED's finding and
+    // carries no publish time; the age gate must not double-report it.
     const raw = [];
     pushAbsenceFlag(raw, p.version, meta);
-    const flags = suppress(ctx, p.name, p.version, raw);
-    const status = isSuspicious(flags) ? 'SUSPICIOUS' : 'CLEAN';
-    db.recordPackage({ name: p.name, version: p.version, status, flags });
-    const names = flags.map((f) => f.flag).join(',');
-    log(`  [${status === 'SUSPICIOUS' ? 'SUSPICIOUS !!' : 'clean'}] ${label}${names ? ` {${names}}` : ''}`);
-    for (const f of flags) if (f.detail) logDetail(log, f.detail);
-    return { ...p, status, flags };
+    return { ...p, ...recordMetaOnly(p, ctx, raw) };
   }
+
+  const age = ctx.publishAge ? gatePublishAge(p, meta, ctx) : null;
+  try {
+    return await compareArtifact(p, ctx, meta, age);
+  } catch (e) {
+    // The gate needed neither the artifact nor the git side, so a failure in
+    // either must not swallow its finding.
+    if (!age || age.flags.length === 0) throw e;
+    return {
+      ...p, error: e.message, publishAge: age.publishAge,
+      ...recordMetaOnly(p, ctx, age.flags, { note: `comparison failed: ${e.message}`, details: false }),
+    };
+  }
+}
+
+async function compareArtifact(p, ctx, meta, age) {
+  const { db, log, treeCache, blobCache, state } = ctx;
+  const label = `${p.name}@${p.version}`;
 
   const crate = await fetchCrate(p.name, p.version, { meta });
   try {
@@ -251,7 +366,9 @@ async function checkOne(p, ctx) {
     // path_in_vcs from .cargo_vcs_info.json is authoritative when present.
     const diffOpts = crate.vcsInfo ? { knownPrefix: crate.vcsInfo.pathInVcs } : {};
     const result = diff(crate.crateFiles, gt.gitFiles, crate.prefix, diffOpts);
-    let flags = [...result.flags];
+    // The age finding leads: it is already decided, and it is what a reader
+    // needs first when it lands next to a divergence flag.
+    let flags = [...(age ? age.flags : []), ...result.flags];
 
     // Manifest lane: dependency NAMES declared in the artifact's Cargo.toml but
     // absent from the git-side manifest (DEP_INJECTED — the arrayref@0.3.10
@@ -334,6 +451,7 @@ async function checkOne(p, ctx) {
       ...p, status, flags, gitPrefix: result.gitPrefix, viaCommit: gt.viaCommit,
       ref: gt.ref, host: gt.host, refKind: gt.refKind,
       manifestSkipped: (manifest && manifest.skipped) || undefined,
+      publishAge: age ? age.publishAge : undefined,
     };
   } finally {
     crate.cleanup();

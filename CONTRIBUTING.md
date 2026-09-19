@@ -12,11 +12,12 @@ npm install
 npm test
 ```
 
-Node.js **>= 18** is required.
+Node.js **>= 22** is required. `better-sqlite3` needs it, and on an older Node
+the scanner segfaults rather than refusing to start.
 
 ## Running the Tests
 
-`npm test` runs the full suite via `test/run.js`, which executes four test
+`npm test` runs the full suite via `test/run.js`, which executes nine test
 suites in sequence.
 
 The integration test runs **fully offline**. It spins up a local mock server

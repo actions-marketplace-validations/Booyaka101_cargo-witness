@@ -80,7 +80,7 @@ Action with a job summary, a `fail-on` severity gate, and SARIF output for code
 scanning.
 
 No API keys, no accounts, no paid services — a `GITHUB_TOKEN` just raises the
-git-trees API rate limit. Runs on any machine with Node 18+.
+git-trees API rate limit. Runs on any machine with Node 22+.
 
 Honest about what it is: a detection aid, not a guarantee. An attacker who *also*
 tampers with the git tag/commit, or a crate whose repo has no matching commit, can
